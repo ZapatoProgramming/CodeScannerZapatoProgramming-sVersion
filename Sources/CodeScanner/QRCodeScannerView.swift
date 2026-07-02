@@ -1,6 +1,7 @@
 #if os(iOS)
 import AVFoundation
 import SwiftUI
+import UIKit
 
 /// An enum describing the ways QRCodeScannerView can hit scanning problems.
 public enum QRScanError: Error {
@@ -93,9 +94,15 @@ public struct QRCodeScannerView: UIViewControllerRepresentable {
     var completion: (Result<QRScanResult, QRScanError>) -> Bool
 
     /// Cosmetic-only path — fires later (after an internal photo capture completes)
-    /// with a crop of the QR that was scanned. Optional; callers that don't need a
-    /// frozen thumbnail can simply not pass this.
-    var onThumbnailCaptured: ((UIImage) -> Void)?
+    /// with the QR crop and that exact crop's rectangle projected back into preview
+    /// coordinates. Optional; callers that don't need a frozen thumbnail can omit it.
+    var onThumbnailCaptured: ((UIImage, CGRect?) -> Void)?
+
+    /// Cosmetic-only path — fires if the photo capture genuinely gives up (exhausted
+    /// its retries, or was never viable) instead of `onThumbnailCaptured`. This is
+    /// what callers should treat as "no thumbnail is coming for this scan," rather
+    /// than a fixed timeout racing against a capture that's merely running slow.
+    var onThumbnailCaptureFailed: (() -> Void)?
 
     /// Whether the controller should bother capturing a thumbnail for the *next*
     /// detected code. Callers should flip this to `false` right after consuming one
@@ -118,7 +125,8 @@ public struct QRCodeScannerView: UIViewControllerRepresentable {
         videoCaptureDevice: AVCaptureDevice? = AVCaptureDevice.bestForQRVideo,
         thumbnailCaptureArmed: Bool = true,
         completion: @escaping (Result<QRScanResult, QRScanError>) -> Bool,
-        onThumbnailCaptured: ((UIImage) -> Void)? = nil
+        onThumbnailCaptured: ((UIImage, CGRect?) -> Void)? = nil,
+        onThumbnailCaptureFailed: (() -> Void)? = nil
     ) {
         self.codeTypes = codeTypes
         self.scanMode = scanMode
@@ -134,15 +142,20 @@ public struct QRCodeScannerView: UIViewControllerRepresentable {
         self.thumbnailCaptureArmed = thumbnailCaptureArmed
         self.completion = completion
         self.onThumbnailCaptured = onThumbnailCaptured
+        self.onThumbnailCaptureFailed = onThumbnailCaptureFailed
     }
 
-    public func makeUIViewController(context: Context) -> ScannerViewController {
+    public func makeUIViewController(context: Context) -> UIViewController {
         return ScannerViewController(showViewfinder: showViewfinder, parentView: self)
     }
 
-    public func updateUIViewController(_ uiViewController: ScannerViewController, context: Context) {
-        uiViewController.parentView = self
-        uiViewController.updateViewController(
+    public func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
+        guard let scannerViewController = uiViewController as? ScannerViewController else {
+            return
+        }
+
+        scannerViewController.parentView = self
+        scannerViewController.updateViewController(
             isTorchOn: isTorchOn,
             isGalleryPresented: isGalleryPresented.wrappedValue,
             isManualCapture: scanMode.isManual,
@@ -155,7 +168,7 @@ public struct QRCodeScannerView: UIViewControllerRepresentable {
 
 extension AVCaptureDevice {
     /// This returns the Ultra Wide Camera on capable devices and the default Camera for Video otherwise.
-    static var bestForQRVideo: AVCaptureDevice? {
+    public static var bestForQRVideo: AVCaptureDevice? {
         let deviceHasUltraWideCamera = !AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInUltraWideCamera], mediaType: .video, position: .back).devices.isEmpty
         return deviceHasUltraWideCamera ? AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back) : AVCaptureDevice.default(for: .video)
     }

@@ -32,7 +32,7 @@ nonisolated private final class QRCaptureSessionRunner: @unchecked Sendable {
 @available(iOS 17.0, *)
 extension QRCodeScannerView {
 
-    public final class ScannerViewController: UIViewController, UINavigationControllerDelegate {
+    final class ScannerViewController: UIViewController, UINavigationControllerDelegate {
         private struct ThumbnailCaptureContext {
             let payload: String
             let screenRect: CGRect?
@@ -116,6 +116,11 @@ extension QRCodeScannerView {
                   pendingThumbnailContext != nil else {
                 print("⚠️ Thumbnail capture failed after \(thumbnailCaptureAttempt) attempt(s): \(reason)")
                 pendingThumbnailContext = nil
+                // Definitive give-up, not just "still running" — this is what tells
+                // the caller to stop waiting for a thumbnail on this scan cycle.
+                DispatchQueue.main.async { [weak self] in
+                    self?.parentView.onThumbnailCaptureFailed?()
+                }
                 return
             }
 
@@ -212,6 +217,43 @@ extension QRCodeScannerView {
             return padded.integral.intersection(fullRect)
         }
 
+        /// Projects a still-photo pixel rectangle through the preview layer's
+        /// `.resizeAspectFill` transform. This is the inverse of `previewMappedRect`
+        /// and lets the animation target the exact region used for the thumbnail.
+        private func previewRect(
+            for imageRect: CGRect,
+            context: ThumbnailCaptureContext,
+            imageSize: CGSize
+        ) -> CGRect? {
+            guard context.previewBounds.width > 0,
+                  context.previewBounds.height > 0,
+                  imageSize.width > 0,
+                  imageSize.height > 0 else {
+                return nil
+            }
+
+            let previewSize = context.previewBounds.size
+            let scale = max(
+                previewSize.width / imageSize.width,
+                previewSize.height / imageSize.height
+            )
+            let displayedSize = CGSize(
+                width: imageSize.width * scale,
+                height: imageSize.height * scale
+            )
+            let displayedOrigin = CGPoint(
+                x: context.previewBounds.minX + (previewSize.width - displayedSize.width) / 2,
+                y: context.previewBounds.minY + (previewSize.height - displayedSize.height) / 2
+            )
+
+            return CGRect(
+                x: displayedOrigin.x + imageRect.minX * scale,
+                y: displayedOrigin.y + imageRect.minY * scale,
+                width: imageRect.width * scale,
+                height: imageRect.height * scale
+            )
+        }
+
         func openGallery() {
             isGalleryShowing = true
             let imagePicker = UIImagePickerController()
@@ -280,7 +322,10 @@ extension QRCodeScannerView {
             guard wasAccepted, parentView.thumbnailCaptureArmed else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
                 guard let self else { return }
-                self.parentView.onThumbnailCaptured?(Self.makeSimulatedThumbnail(size: syntheticRect.size))
+                self.parentView.onThumbnailCaptured?(
+                    Self.makeSimulatedThumbnail(size: syntheticRect.size),
+                    syntheticRect
+                )
             }
         }
 
@@ -671,6 +716,40 @@ extension QRCodeScannerView.ScannerViewController: @preconcurrency AVCaptureMeta
             return
         }
 
+        // PATCH 2: the scan-mode policy decides whether this detection is even worth
+        // pursuing *before* any further work happens — dedup/interval-throttled/
+        // duplicate frames (the common case at 15-30 detections/sec while a code
+        // sits in view) bail out here without paying for the screen-space transform
+        // below. Each case's own bookkeeping (didFinishScanning/codesFound) runs
+        // exactly where it did before; only the transform + `found()` call move to
+        // after the decision.
+        var shouldTryAccept = false
+        switch parentView.scanMode {
+        case .once:
+            shouldTryAccept = true
+            didFinishScanning = true
+
+        case .manual:
+            if !didFinishScanning, isWithinManualCaptureInterval {
+                shouldTryAccept = true
+                didFinishScanning = true
+            }
+
+        case .oncePerCode:
+            if !codesFound.contains(stringValue) {
+                codesFound.insert(stringValue)
+                shouldTryAccept = true
+            }
+
+        case .continuous:
+            shouldTryAccept = isPastScanInterval
+
+        case .continuousExcept(let ignoredList):
+            shouldTryAccept = isPastScanInterval && !ignoredList.contains(stringValue)
+        }
+
+        guard shouldTryAccept else { return }
+
         // PATCH 1: screen-space bounds, via the preview layer this file now owns —
         // this is the transform upstream never applied.
         #if !targetEnvironment(simulator)
@@ -687,38 +766,9 @@ extension QRCodeScannerView.ScannerViewController: @preconcurrency AVCaptureMeta
             screenRect: screenRect
         )
 
-        // PATCH 2: functional dispatch fires right here, synchronously — it no longer
-        // waits on a photo capture. This mirrors upstream's scan-mode logic exactly,
-        // just applied directly to `result` instead of inside a `handler` closure that
-        // used to be deferred until the photo delegate ran.
-        var wasAccepted = false
-        switch parentView.scanMode {
-        case .once:
-            wasAccepted = found(result)
-            didFinishScanning = true
-
-        case .manual:
-            if !didFinishScanning, isWithinManualCaptureInterval {
-                wasAccepted = found(result)
-                didFinishScanning = true
-            }
-
-        case .oncePerCode:
-            if !codesFound.contains(stringValue) {
-                codesFound.insert(stringValue)
-                wasAccepted = found(result)
-            }
-
-        case .continuous:
-            if isPastScanInterval {
-                wasAccepted = found(result)
-            }
-
-        case .continuousExcept(let ignoredList):
-            if isPastScanInterval, !ignoredList.contains(stringValue) {
-                wasAccepted = found(result)
-            }
-        }
+        // Functional dispatch fires right here, synchronously — it no longer waits
+        // on a photo capture.
+        let wasAccepted = found(result)
 
         // Cosmetic-only from here down: capture a photo to crop a thumbnail from.
         // `wasAccepted` is the caller's synchronous acknowledgement that this
@@ -825,7 +875,7 @@ extension QRCodeScannerView.ScannerViewController: @preconcurrency AVCapturePhot
         // `UIImage.cgImage` ignores `imageOrientation` — normalize first so the pixel
         // buffer we crop actually matches the visual (EXIF-corrected) orientation the
         // normalized bounds assume.
-        let uprightImage = qrImage.normalizingOrientation()
+        let uprightImage = qrImage.fixedOrientation()
         guard let cgImage = uprightImage.cgImage else {
             retryOrFinishThumbnailCapture(reason: "Photo has no CGImage backing")
             return
@@ -852,8 +902,13 @@ extension QRCodeScannerView.ScannerViewController: @preconcurrency AVCapturePhot
         isCapturing = false
         pendingThumbnailContext = nil
         let thumbnail = UIImage(cgImage: croppedCGImage)
+        let thumbnailPreviewRect = previewRect(
+            for: cropRect,
+            context: context,
+            imageSize: fullRect.size
+        )
         DispatchQueue.main.async { [weak self] in
-            self?.parentView.onThumbnailCaptured?(thumbnail)
+            self?.parentView.onThumbnailCaptured?(thumbnail, thumbnailPreviewRect)
         }
     }
 
@@ -873,15 +928,16 @@ extension QRCodeScannerView.ScannerViewController: @preconcurrency AVCapturePhot
 }
 
 private extension UIImage {
-    /// Re-renders the image with `imageOrientation == .up`, so its `cgImage`'s raw
-    /// pixel layout matches what's visually displayed (needed before cropping by pixel
-    /// coordinates — `cgImage` alone ignores `imageOrientation`).
-    func normalizingOrientation() -> UIImage {
+    /// Re-renders the image with an `.up` orientation so raw CGImage pixels and crop
+    /// coordinates describe the same visual image.
+    func fixedOrientation() -> UIImage {
         guard imageOrientation != .up else { return self }
         let format = UIGraphicsImageRendererFormat.default()
         format.scale = scale
         let renderer = UIGraphicsImageRenderer(size: size, format: format)
-        return renderer.image { _ in draw(in: CGRect(origin: .zero, size: size)) }
+        return renderer.image { _ in
+            draw(in: CGRect(origin: .zero, size: size))
+        }
     }
 }
 #endif
