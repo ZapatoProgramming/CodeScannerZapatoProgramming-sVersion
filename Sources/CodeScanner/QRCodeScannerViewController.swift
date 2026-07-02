@@ -32,7 +32,7 @@ nonisolated private final class QRCaptureSessionRunner: @unchecked Sendable {
 @available(iOS 17.0, *)
 extension QRCodeScannerView {
 
-    final class ScannerViewController: UIViewController, UINavigationControllerDelegate {
+    public final class ScannerViewController: UIViewController, UINavigationControllerDelegate {
         private struct ThumbnailCaptureContext {
             let payload: String
             let screenRect: CGRect?

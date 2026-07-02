@@ -3,7 +3,7 @@ import AVFoundation
 import SwiftUI
 
 /// An enum describing the ways QRCodeScannerView can hit scanning problems.
-enum QRScanError: Error {
+public enum QRScanError: Error {
     /// The camera could not be accessed.
     case badInput
 
@@ -21,25 +21,25 @@ enum QRScanError: Error {
 /// found, and (if available) where the code was on screen at the moment of detection,
 /// already converted into the preview layer's coordinate space via
 /// `AVCaptureVideoPreviewLayer.transformedMetadataObject(for:)`.
-struct QRScanResult {
+public struct QRScanResult {
     /// The contents of the code.
-    let string: String
+    public let string: String
 
     /// The type of code that was matched.
-    let type: AVMetadataObject.ObjectType
+    public let type: AVMetadataObject.ObjectType
 
     /// The corner coordinates of the scanned code, in the metadata output's own
     /// (untransformed) normalized coordinate space — kept for parity with upstream,
     /// used internally to crop the cosmetic thumbnail.
-    let corners: [CGPoint]
+    public let corners: [CGPoint]
 
     /// Where the code appeared on screen, in the preview layer's (i.e. this view's)
     /// coordinate space. `nil` if no preview layer was available at detection time.
-    let screenRect: CGRect?
+    public let screenRect: CGRect?
 }
 
 /// The operating mode for QRCodeScannerView.
-enum QRScanMode {
+public enum QRScanMode {
     /// Scan exactly one code, then stop.
     case once
 
@@ -72,7 +72,7 @@ enum QRScanMode {
 /// `thumbnailCaptureArmed` so callers can stop the (comparatively expensive) capture
 /// once per scan cycle instead of on every detected frame.
 @available(iOS 17.0, *)
-struct QRCodeScannerView: UIViewControllerRepresentable {
+public struct QRCodeScannerView: UIViewControllerRepresentable {
 
     let codeTypes: [AVMetadataObject.ObjectType]
     let scanMode: QRScanMode
@@ -104,7 +104,7 @@ struct QRCodeScannerView: UIViewControllerRepresentable {
     /// long as the same QR sits in frame during the wait/result window.
     var thumbnailCaptureArmed: Bool
 
-    init(
+    public init(
         codeTypes: [AVMetadataObject.ObjectType],
         scanMode: QRScanMode = .once,
         manualSelect: Bool = false,
@@ -136,11 +136,11 @@ struct QRCodeScannerView: UIViewControllerRepresentable {
         self.onThumbnailCaptured = onThumbnailCaptured
     }
 
-    func makeUIViewController(context: Context) -> ScannerViewController {
+    public func makeUIViewController(context: Context) -> ScannerViewController {
         return ScannerViewController(showViewfinder: showViewfinder, parentView: self)
     }
 
-    func updateUIViewController(_ uiViewController: ScannerViewController, context: Context) {
+    public func updateUIViewController(_ uiViewController: ScannerViewController, context: Context) {
         uiViewController.parentView = self
         uiViewController.updateViewController(
             isTorchOn: isTorchOn,
